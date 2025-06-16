@@ -68,7 +68,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         cameraExecutor = Executors.newSingleThreadExecutor()
-        objectDetector = ObjectDetector(this)
+        objectDetector = ObjectDetector()
         overlay = BoundingBoxOverlay(this)
 
         setContent {
@@ -127,9 +127,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Composable
+/*@Composable
 fun CalibrationControls(
-    speedCalculator: SpeedCalculator,
+speedCalculator: SpeedCalculator,
     modifier: Modifier = Modifier
 ) {
     var calibrationValue by remember { mutableStateOf(100f) }
@@ -147,6 +147,7 @@ fun CalibrationControls(
         Text("%.1f px/m".format(calibrationValue))
     }
 }
+*/
 
 @Composable
 private fun CameraPreview(
@@ -272,7 +273,6 @@ class VehicleAnalyzer(
                                 previousBox = lastBox,
                                 currentBox = boundingBox,
                                 imageWidth = imageProxy.width,
-                                imageHeight = imageProxy.height,
                                 timeDeltaSeconds = timeDelta
                             )
 
