@@ -2,7 +2,6 @@
 
 RoadRadar is a sophisticated Android application designed for real-time vehicle detection and speed estimation. By leveraging cutting-edge computer vision and machine learning, RoadRadar transforms your smartphone into a powerful traffic monitoring tool.
 
-![RoadRadar Logo](roadradar_logo_1774370497843.png)
 
 ## 🌟 Key Features
 
