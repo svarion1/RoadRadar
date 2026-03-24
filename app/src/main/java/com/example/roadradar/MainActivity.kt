@@ -60,11 +60,10 @@ import java.util.concurrent.Executors
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var objectDetector: ObjectDetector
-    private val vehicleSpeed = MutableStateFlow(0.0)
-    private val speedCalculator = SpeedCalculator()
+    private val vehicleSpeed = MutableStateFlow(0.0)   // max speed across all tracks (HUD)
+    private val vehicleTracker = VehicleTracker()
     private lateinit var overlay: BoundingBoxOverlay
 
-    // Shared mutable state so VehicleAnalyzer can push a frozen frame into the wizard
     val frozenFrame = MutableStateFlow<Bitmap?>(null)
     val captureNextFrame = MutableStateFlow(false)
 
@@ -75,9 +74,9 @@ class MainActivity : ComponentActivity() {
         objectDetector = ObjectDetector()
         overlay = BoundingBoxOverlay(this)
 
-        // Load the active calibration profile on startup
+        // Load active calibration profile into the tracker on startup
         CalibrationProfileStore.loadActive(this)?.let { profile ->
-            speedCalculator.loadCalibrationProfile(profile)
+            vehicleTracker.loadCalibrationProfile(profile)
         }
 
         setContent {
@@ -90,11 +89,10 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
 
-                        // Camera preview
                         CameraPreviewComposable(
                             cameraExecutor = cameraExecutor,
                             objectDetector = objectDetector,
-                            speedCalculator = speedCalculator,
+                            vehicleTracker = vehicleTracker,
                             vehicleSpeed = vehicleSpeed,
                             overlay = overlay,
                             captureNextFrame = captureNextFrame,
@@ -106,7 +104,7 @@ class MainActivity : ComponentActivity() {
                         )
                         SpeedDisplay(vehicleSpeed)
 
-                        // ── Top-right toolbar ──────────────────────────────────────
+                        // ── Top-right toolbar ──────────────────────────────────────────
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
@@ -135,21 +133,25 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // ── Legacy calibration sliders ─────────────────────────────
+                        // ── Legacy calibration sliders ─────────────────────────────────
                         AnimatedVisibility(visible = showCalibrationSettings) {
+                            // Create a thin SpeedCalculator facade so CalibrationSettingsScreen
+                            // still compiles unchanged; its pixel-ratio changes are minor vs.
+                            // the homography but useful as a rough fallback.
+                            val facadeCalc = remember { SpeedCalculator() }
                             CalibrationSettingsScreen(
-                                speedCalculator = speedCalculator,
+                                speedCalculator = facadeCalc,
                                 onBackPressed = { showCalibrationSettings = false }
                             )
                         }
 
-                        // ── New calibration wizard ─────────────────────────────────
+                        // ── New calibration wizard ─────────────────────────────────────
                         AnimatedVisibility(visible = showCalibrationWizard) {
                             CalibrationWizardScreen(
                                 frozenFrame = frozen,
                                 onCaptureFrame = { captureNextFrame.value = true },
                                 onSaveProfile = { profile ->
-                                    speedCalculator.loadCalibrationProfile(profile)
+                                    vehicleTracker.loadCalibrationProfile(profile)
                                     showCalibrationWizard = false
                                 },
                                 onDismiss = {
@@ -174,7 +176,7 @@ class MainActivity : ComponentActivity() {
 private fun CameraPreviewComposable(
     cameraExecutor: ExecutorService,
     objectDetector: ObjectDetector,
-    speedCalculator: SpeedCalculator,
+    vehicleTracker: VehicleTracker,
     vehicleSpeed: MutableStateFlow<Double>,
     overlay: BoundingBoxOverlay,
     captureNextFrame: MutableStateFlow<Boolean>,
@@ -206,7 +208,7 @@ private fun CameraPreviewComposable(
                             analysis.setAnalyzer(
                                 cameraExecutor,
                                 VehicleAnalyzer(
-                                    objectDetector, speedCalculator, vehicleSpeed, overlay,
+                                    objectDetector, vehicleTracker, vehicleSpeed, overlay,
                                     captureNextFrame, onFrameCaptured
                                 )
                             )
@@ -247,20 +249,18 @@ fun SpeedDisplay(vehicleSpeed: StateFlow<Double>) {
 
 class VehicleAnalyzer(
     private val objectDetector: ObjectDetector,
-    private val speedCalculator: SpeedCalculator,
+    private val vehicleTracker: VehicleTracker,
     private val vehicleSpeed: MutableStateFlow<Double>,
     private val overlay: BoundingBoxOverlay,
     private val captureNextFrame: MutableStateFlow<Boolean>,
     private val onFrameCaptured: (Bitmap) -> Unit
 ) : ImageAnalysis.Analyzer {
 
-    private var lastFrameTimestamp: Long = 0
-    private var lastVehicleBoundingBox: Rect? = null
-
     override fun analyze(imageProxy: ImageProxy) {
-        val currentTimestamp = System.currentTimeMillis()
+        val timestampMs = System.currentTimeMillis()
         val bitmap = imageProxy.toBitmap()
-        val imageWidth = imageProxy.width
+        val imageWidth  = imageProxy.width
+        val imageHeight = imageProxy.height
 
         // Capture frame for wizard if requested
         if (captureNextFrame.value) {
@@ -271,54 +271,46 @@ class VehicleAnalyzer(
         CoroutineScope(Dispatchers.Default).launch {
             try {
                 val detectedObjects = objectDetector.detectVehicles(bitmap)
-                overlay.setDetectedObjects(detectedObjects, imageWidth, imageProxy.height)
 
-                val largestVehicle = findLargestVehicle(detectedObjects)
-                largestVehicle?.let { vehicle ->
-                    val boundingBox = vehicle.boundingBox
-                    lastVehicleBoundingBox?.let { lastBox ->
-                        if (lastFrameTimestamp > 0) {
-                            val timeDelta = (currentTimestamp - lastFrameTimestamp) / 1000.0
-                            val speed = speedCalculator.calculateSpeed(
-                                previousBox = lastBox,
-                                currentBox = boundingBox,
-                                imageWidth = imageWidth,
-                                timeDeltaSeconds = timeDelta
-                            )
-                            vehicleSpeed.value = speed
+                // Build (trackingId, boundingBox) pairs — only for vehicle-classified objects
+                val vehicleDetections = detectedObjects
+                    .filter { obj ->
+                        obj.labels.any {
+                            (it.text.lowercase() == "object" ||
+                                    it.text.lowercase() == "truck" ||
+                                    it.text.lowercase() == "bus") && it.confidence > 0.6f
                         }
                     }
-                    lastVehicleBoundingBox = boundingBox
-                    lastFrameTimestamp = currentTimestamp
-                } ?: run {
-                    if (currentTimestamp - lastFrameTimestamp > 2000) {
-                        lastVehicleBoundingBox = null
-                        vehicleSpeed.value = 0.0
+                    .mapNotNull { obj ->
+                        val id = obj.trackingId ?: return@mapNotNull null
+                        Pair(id, obj.boundingBox)
                     }
-                }
+
+                // Update tracker — get per-vehicle speeds
+                val trackSpeeds = vehicleTracker.update(
+                    detections = vehicleDetections,
+                    imageWidth  = imageWidth,
+                    timestampMs = timestampMs
+                )
+
+                // HUD shows the highest speed currently detected
+                val maxSpeed = trackSpeeds.values.maxOrNull() ?: 0.0
+                vehicleSpeed.value = maxSpeed
+
+                // Pass full object list + speeds to overlay
+                overlay.setDetectedObjects(
+                    objects     = detectedObjects,
+                    imageWidth  = imageWidth,
+                    imageHeight = imageHeight,
+                    speeds      = trackSpeeds
+                )
+
             } catch (e: Exception) {
                 Log.e("VehicleAnalyzer", "Error analyzing image", e)
             } finally {
                 imageProxy.close()
             }
         }
-    }
-
-    private fun findLargestVehicle(objects: List<DetectedObject>): DetectedObject? {
-        var largestVehicle: DetectedObject? = null
-        var largestArea = 0
-        objects.forEach { obj ->
-            val isVehicle = obj.labels.any {
-                (it.text.lowercase() == "object" ||
-                        it.text.lowercase() == "truck" ||
-                        it.text.lowercase() == "bus") && it.confidence > 0.6f
-            }
-            if (isVehicle) {
-                val area = obj.boundingBox.width() * obj.boundingBox.height()
-                if (area > largestArea) { largestArea = area; largestVehicle = obj }
-            }
-        }
-        return largestVehicle
     }
 }
 
@@ -340,9 +332,7 @@ fun DefaultPreview() {
         Box(modifier = Modifier.fillMaxSize()) {
             PreviewCameraPreview()
             SpeedDisplay(vehicleSpeed = simulatedSpeed)
-            Box(
-                modifier = Modifier.align(Alignment.TopCenter).padding(16.dp)
-            ) {
+            Box(modifier = Modifier.align(Alignment.TopCenter).padding(16.dp)) {
                 Text("RoadRadar", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
             Box(

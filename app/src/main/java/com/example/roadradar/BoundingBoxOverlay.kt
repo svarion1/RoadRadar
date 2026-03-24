@@ -1,14 +1,27 @@
 package com.example.roadradar
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.View
 import com.google.mlkit.vision.objects.DetectedObject
 
+/**
+ * Draws per-vehicle bounding boxes and speed labels on top of the camera preview.
+ *
+ * Speed labels are colour-coded:
+ *   Green  < 50 km/h
+ *   Amber  50–79 km/h
+ *   Red   ≥ 80 km/h
+ *
+ * Call [setDetectedObjects] from the analyzer thread whenever a new frame is
+ * processed; the view redraws itself via [postInvalidate].
+ */
 class BoundingBoxOverlay(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
 
     private var detectedObjects: List<DetectedObject> = emptyList()
+    private var trackSpeeds: Map<Int, Double> = emptyMap()
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
     private var scaleX: Float = 1f
@@ -16,43 +29,78 @@ class BoundingBoxOverlay(context: Context, attrs: AttributeSet? = null) : View(c
     private var offsetX: Float = 0f
     private var offsetY: Float = 0f
 
-    private val boxPaint = Paint().apply {
+    // ── Paints ──────────────────────────────────────────────────────────────
+
+    private val boxPaintDefault = Paint().apply {
         color = Color.YELLOW
         style = Paint.Style.STROKE
         strokeWidth = 5f
     }
-    private val textPaint = Paint().apply {
-        color = Color.WHITE
-        textSize = 30f
-        typeface = Typeface.DEFAULT_BOLD
+
+    private fun speedBoxPaint(speedKmh: Double) = Paint().apply {
+        color = when {
+            speedKmh < 50  -> Color.rgb(76, 175, 80)    // green
+            speedKmh < 80  -> Color.rgb(255, 152, 0)    // amber
+            else           -> Color.rgb(244, 67, 54)     // red
+        }
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
     }
 
-    fun setDetectedObjects(objects: List<DetectedObject>, imageWidth: Int, imageHeight: Int) {
+    private val labelBgPaint = Paint().apply {
+        color = Color.argb(160, 0, 0, 0)   // semi-transparent black
+        style = Paint.Style.FILL
+    }
+
+    private val labelTextPaint = Paint().apply {
+        color = Color.WHITE
+        textSize = 34f
+        typeface = Typeface.DEFAULT_BOLD
+        isAntiAlias = true
+    }
+
+    private val trackIdPaint = Paint().apply {
+        color = Color.LTGRAY
+        textSize = 22f
+        isAntiAlias = true
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────────
+
+    /**
+     * Update the overlay with the latest detections and per-track speeds.
+     *
+     * @param objects     Raw ML Kit detected objects (used for bounding boxes & labels)
+     * @param imageWidth  Camera image width in pixels
+     * @param imageHeight Camera image height in pixels
+     * @param speeds      Map of trackingId → speed in km/h (may be empty on first frame)
+     */
+    fun setDetectedObjects(
+        objects: List<DetectedObject>,
+        imageWidth: Int,
+        imageHeight: Int,
+        speeds: Map<Int, Double> = emptyMap()
+    ) {
         this.detectedObjects = objects
+        this.trackSpeeds = speeds
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
         calculateTransformation()
-        postInvalidate() // Request the view to redraw
+        postInvalidate()
     }
+
+    // ── Layout & drawing ─────────────────────────────────────────────────────
 
     private fun calculateTransformation() {
         if (width > 0 && height > 0 && imageWidth > 0 && imageHeight > 0) {
-            // Calculate scale factors
-            val scaleFactorX = width.toFloat() / imageWidth.toFloat()
-            val scaleFactorY = height.toFloat() / imageHeight.toFloat()
-            
-            // Use the smaller scale factor to maintain aspect ratio
-            val scaleFactor = minOf(scaleFactorX, scaleFactorY)
-            
+            val scaleFactor = minOf(
+                width.toFloat() / imageWidth.toFloat(),
+                height.toFloat() / imageHeight.toFloat()
+            )
             scaleX = scaleFactor
             scaleY = scaleFactor
-            
-            // Calculate offsets to center the image
-            val scaledImageWidth = imageWidth * scaleFactor
-            val scaledImageHeight = imageHeight * scaleFactor
-            
-            offsetX = (width - scaledImageWidth) / 2f
-            offsetY = (height - scaledImageHeight) / 2f
+            offsetX = (width  - imageWidth  * scaleFactor) / 2f
+            offsetY = (height - imageHeight * scaleFactor) / 2f
         }
     }
 
@@ -61,26 +109,59 @@ class BoundingBoxOverlay(context: Context, attrs: AttributeSet? = null) : View(c
         calculateTransformation()
     }
 
+    @SuppressLint("DefaultLocale")
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-
         if (imageWidth == 0 || imageHeight == 0) return
 
-        detectedObjects.forEach { detectedObject ->
-            val box = detectedObject.boundingBox
-            
-            // Transform coordinates from image space to view space
-            val left = box.left * scaleX + offsetX
-            val top = box.top * scaleY + offsetY
-            val right = box.right * scaleX + offsetX
-            val bottom = box.bottom * scaleY + offsetY
-            
-            val transformedBox = RectF(left, top, right, bottom)
-            
-            canvas.drawRect(transformedBox, boxPaint)
+        detectedObjects.forEach { obj ->
+            val box = obj.boundingBox
+            val trackId = obj.trackingId
+            val speed = trackId?.let { trackSpeeds[it] }
 
-            val labelText = detectedObject.labels.firstOrNull()?.text ?: "Object"
-            canvas.drawText(labelText, left, top - 10, textPaint)
+            // Transform coordinates: image space → view space
+            val left   = box.left   * scaleX + offsetX
+            val top    = box.top    * scaleY + offsetY
+            val right  = box.right  * scaleX + offsetX
+            val bottom = box.bottom * scaleY + offsetY
+            val rect   = RectF(left, top, right, bottom)
+
+            // Bounding box — colour-coded by speed when available
+            val boxPaint = if (speed != null) speedBoxPaint(speed) else boxPaintDefault
+            canvas.drawRoundRect(rect, 8f, 8f, boxPaint)
+
+            // Speed label
+            val speedText = when {
+                speed == null  -> "-- km/h"
+                speed < 1.0    -> "standing"
+                else           -> String.format("%.0f km/h", speed)
+            }
+
+            // Measure text to draw background pill
+            val textW = labelTextPaint.measureText(speedText)
+            val textH = labelTextPaint.textSize
+            val padH = 6f; val padV = 4f
+            val bgRect = RectF(
+                left,
+                top - textH - padV * 2,
+                left + textW + padH * 2,
+                top
+            )
+            // Keep label inside view bounds
+            if (bgRect.top < 0) bgRect.offset(0f, -bgRect.top)
+
+            canvas.drawRoundRect(bgRect, 6f, 6f, labelBgPaint)
+            canvas.drawText(speedText, bgRect.left + padH, bgRect.bottom - padV, labelTextPaint)
+
+            // Track ID (small, bottom-right of box)
+            trackId?.let {
+                canvas.drawText(
+                    "#$it",
+                    right - trackIdPaint.measureText("#$it") - 4f,
+                    bottom - 4f,
+                    trackIdPaint
+                )
+            }
         }
     }
 }
