@@ -3,6 +3,7 @@ package com.example.roadradar
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -20,7 +21,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
@@ -47,7 +47,7 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-private const val PREFS_UI = "road_radar_ui_prefs"
+private const val PREFS_UI    = "road_radar_ui_prefs"
 private const val KEY_SHOW_GRID = "show_calibration_grid"
 
 class MainActivity : ComponentActivity() {
@@ -79,7 +79,6 @@ class MainActivity : ComponentActivity() {
                 var showCalibrationSettings  by remember { mutableStateOf(false) }
                 var showCalibrationWizard    by remember { mutableStateOf(false) }
                 var showProfileManager       by remember { mutableStateOf(false) }
-                // Grid toggle persisted across app restarts
                 var showCalibrationGrid      by remember { mutableStateOf(uiPrefs.getBoolean(KEY_SHOW_GRID, false)) }
                 var activeCalibrationProfile by remember { mutableStateOf<CalibrationProfile?>(null) }
                 val frozen by frozenFrame.collectAsState()
@@ -91,7 +90,6 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
 
-                        // Camera feed
                         CameraPreviewComposable(
                             cameraExecutor   = cameraExecutor,
                             objectDetector   = objectDetector,
@@ -102,13 +100,11 @@ class MainActivity : ComponentActivity() {
                             onFrameCaptured  = { bmp -> frozenFrame.value = bmp }
                         )
 
-                        // Bounding box overlay
                         AndroidView(
                             factory  = { _ -> overlay },
                             modifier = Modifier.matchParentSize()
                         )
 
-                        // Calibration grid overlay (Phase 3, toggle persisted)
                         if (showCalibrationGrid) {
                             CalibrationGridOverlay(
                                 profile  = activeCalibrationProfile,
@@ -116,10 +112,8 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Speed HUD
                         SpeedDisplay(vehicleSpeed)
 
-                        // Confidence badge — top-left, only when a profile is active
                         activeCalibrationProfile?.let { profile ->
                             CalibrationConfidenceBadge(
                                 profile  = profile,
@@ -129,14 +123,12 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Top-right toolbar: Grid | Profiles | Wizard | Settings
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(top = 8.dp, end = 8.dp)
                         ) {
                             Row {
-                                // Grid toggle
                                 IconButton(
                                     onClick = {
                                         val next = !showCalibrationGrid
@@ -156,16 +148,14 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
-                                // Profile manager
                                 IconButton(onClick = { showProfileManager = true }) {
                                     Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.List,
+                                        imageVector = Icons.Default.List,
                                         contentDescription = "Manage profiles",
                                         tint = Color.White,
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
-                                // Wizard
                                 IconButton(onClick = { showCalibrationWizard = true }) {
                                     Icon(
                                         imageVector = Icons.Default.Star,
@@ -174,7 +164,6 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
-                                // Legacy settings
                                 IconButton(onClick = { showCalibrationSettings = !showCalibrationSettings }) {
                                     Icon(
                                         imageVector = Icons.Default.Settings,
@@ -186,7 +175,6 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // Legacy slider calibration
                         AnimatedVisibility(visible = showCalibrationSettings) {
                             val facadeCalc = remember { SpeedCalculator() }
                             CalibrationSettingsScreen(
@@ -195,7 +183,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Calibration wizard
                         AnimatedVisibility(visible = showCalibrationWizard) {
                             CalibrationWizardScreen(
                                 frozenFrame    = frozen,
@@ -212,7 +199,6 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Profile manager
                         AnimatedVisibility(visible = showProfileManager) {
                             CalibrationProfileManagerScreen(
                                 activeProfileName = activeCalibrationProfile?.name,
@@ -236,13 +222,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ── Calibration confidence badge ──────────────────────────────────────────────────
+// ── Confidence badge ───────────────────────────────────────────────────────────────
 
-/**
- * Small pill badge in the top-left corner of the live view.
- * Shows the active profile name + colour-coded quality indicator.
- * Disappears automatically when no profile is loaded.
- */
 @Composable
 fun CalibrationConfidenceBadge(profile: CalibrationProfile, modifier: Modifier = Modifier) {
     val color = qualityColor(profile.reprojectionErrorPx)
@@ -254,29 +235,13 @@ fun CalibrationConfidenceBadge(profile: CalibrationProfile, modifier: Modifier =
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Coloured dot
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(color, RoundedCornerShape(50))
-        )
-        Text(
-            text = profile.name,
-            fontSize = 11.sp,
-            color = Color.White,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1
-        )
-        Text(
-            text = "\u00b7 $label",
-            fontSize = 11.sp,
-            color = color,
-            fontWeight = FontWeight.SemiBold
-        )
+        Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
+        Text(profile.name,  fontSize = 11.sp, color = Color.White,  fontWeight = FontWeight.Medium,    maxLines = 1)
+        Text("· $label",    fontSize = 11.sp, color = color,         fontWeight = FontWeight.SemiBold)
     }
 }
 
-// ── Camera + analyzer ─────────────────────────────────────────────────────────────────
+// ── Camera preview ─────────────────────────────────────────────────────────────────
 
 @Composable
 private fun CameraPreviewComposable(
@@ -292,7 +257,7 @@ private fun CameraPreviewComposable(
     val context = LocalContext.current
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
 
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner) {
         onDispose {
             try { cameraProviderFuture.get().unbindAll() } catch (e: Exception) { e.printStackTrace() }
         }
@@ -335,6 +300,8 @@ private fun CameraPreviewComposable(
     )
 }
 
+// ── Speed HUD ──────────────────────────────────────────────────────────────────────
+
 @SuppressLint("DefaultLocale")
 @Composable
 fun SpeedDisplay(vehicleSpeed: StateFlow<Double>) {
@@ -342,13 +309,13 @@ fun SpeedDisplay(vehicleSpeed: StateFlow<Double>) {
     Box(contentAlignment = Alignment.BottomCenter, modifier = Modifier.fillMaxSize()) {
         Text(
             text = "${String.format("%.1f", speed)} km/h",
-            color = Color.White,
-            fontSize = 32.sp,
-            fontWeight = FontWeight.Bold,
+            color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(bottom = 32.dp)
         )
     }
 }
+
+// ── Vehicle analyzer ────────────────────────────────────────────────────────────────
 
 class VehicleAnalyzer(
     private val objectDetector: ObjectDetector,
@@ -367,7 +334,14 @@ class VehicleAnalyzer(
 
         if (captureNextFrame.value) {
             captureNextFrame.value = false
-            onFrameCaptured(bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false))
+            // Rotate the bitmap so it is upright on the portrait screen.
+            // CameraX reports rotation in degrees; we apply the same rotation
+            // to the captured Bitmap so the wizard always shows a portrait image.
+            val rotated = rotateBitmapForDisplay(
+                bitmap,
+                imageProxy.imageInfo.rotationDegrees
+            )
+            onFrameCaptured(rotated)
         }
 
         CoroutineScope(Dispatchers.Default).launch {
@@ -385,7 +359,6 @@ class VehicleAnalyzer(
                         val id = obj.trackingId ?: return@mapNotNull null
                         Pair(id, obj.boundingBox)
                     }
-
                 val trackSpeeds = vehicleTracker.update(
                     detections  = vehicleDetections,
                     imageWidth  = imageWidth,
@@ -406,6 +379,19 @@ class VehicleAnalyzer(
         }
     }
 }
+
+/**
+ * Rotates [bitmap] by [rotationDegrees] (as reported by CameraX ImageProxy)
+ * so the image is correctly oriented for portrait display.
+ * Returns the original bitmap unchanged if rotation is 0.
+ */
+fun rotateBitmapForDisplay(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+    if (rotationDegrees == 0) return bitmap
+    val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
+// ── Compose previews ─────────────────────────────────────────────────────────────────
 
 @Composable
 fun PreviewCameraPreview() {
@@ -430,8 +416,7 @@ fun DefaultPreview() {
             }
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(16.dp)
+                    .align(Alignment.BottomStart).padding(16.dp)
                     .background(Color.White.copy(alpha = 0.3f), shape = RoundedCornerShape(8.dp))
             ) {
                 Text("Calibrate", modifier = Modifier.padding(8.dp), color = Color.White)
