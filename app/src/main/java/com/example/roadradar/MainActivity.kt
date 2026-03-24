@@ -18,11 +18,13 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -31,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -84,11 +87,19 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 var showCalibrationSettings by remember { mutableStateOf(false) }
                 var showCalibrationWizard   by remember { mutableStateOf(false) }
+                var showCalibrationGrid     by remember { mutableStateOf(false) }
+                var activeCalibrationProfile by remember { mutableStateOf<CalibrationProfile?>(null) }
                 val frozen by frozenFrame.collectAsState()
+
+                // Load the active profile into local state so the grid can use it
+                LaunchedEffect(Unit) {
+                    activeCalibrationProfile = CalibrationProfileStore.loadActive(context)
+                }
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
 
+                        // ── Camera feed ───────────────────────────────────────────────
                         CameraPreviewComposable(
                             cameraExecutor = cameraExecutor,
                             objectDetector = objectDetector,
@@ -98,46 +109,72 @@ class MainActivity : ComponentActivity() {
                             captureNextFrame = captureNextFrame,
                             onFrameCaptured = { bmp -> frozenFrame.value = bmp }
                         )
+
+                        // ── Bounding box overlay (vehicle labels + speeds) ────────────
                         AndroidView(
                             factory = { _ -> overlay },
                             modifier = Modifier.matchParentSize()
                         )
+
+                        // ── Calibration grid overlay (Phase 3) ───────────────────────
+                        // Drawn above bounding boxes but below the speed HUD and buttons
+                        // so the grid lines never occlude readability-critical text.
+                        if (showCalibrationGrid) {
+                            CalibrationGridOverlay(
+                                profile = activeCalibrationProfile,
+                                modifier = Modifier.matchParentSize()
+                            )
+                        }
+
+                        // ── Speed HUD ─────────────────────────────────────────────────
                         SpeedDisplay(vehicleSpeed)
 
-                        // ── Top-right toolbar ──────────────────────────────────────────
+                        // ── Top-right toolbar (Grid | Wizard | Settings) ──────────────
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .padding(16.dp)
+                                .padding(top = 8.dp, end = 8.dp)
                         ) {
-                            // Wizard button
-                            IconButton(
-                                onClick = { showCalibrationWizard = true },
-                                modifier = Modifier.padding(end = 48.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Star,
-                                    contentDescription = "Calibration Wizard",
-                                    tint = Color.Yellow,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                            }
-                            // Legacy settings button
-                            IconButton(onClick = { showCalibrationSettings = !showCalibrationSettings }) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Calibration Settings",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(32.dp)
-                                )
+                            Row {
+                                // Grid toggle button
+                                IconButton(
+                                    onClick = { showCalibrationGrid = !showCalibrationGrid },
+                                    enabled = activeCalibrationProfile != null
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.GridOn,
+                                        contentDescription = "Toggle calibration grid",
+                                        tint = when {
+                                            activeCalibrationProfile == null -> Color.Gray
+                                            showCalibrationGrid -> Color.Cyan
+                                            else -> Color.White
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                // Wizard button
+                                IconButton(onClick = { showCalibrationWizard = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = "Calibration Wizard",
+                                        tint = Color.Yellow,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                // Legacy settings button
+                                IconButton(onClick = { showCalibrationSettings = !showCalibrationSettings }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Settings,
+                                        contentDescription = "Calibration Settings",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                             }
                         }
 
-                        // ── Legacy calibration sliders ─────────────────────────────────
+                        // ── Legacy calibration sliders ────────────────────────────────
                         AnimatedVisibility(visible = showCalibrationSettings) {
-                            // Create a thin SpeedCalculator facade so CalibrationSettingsScreen
-                            // still compiles unchanged; its pixel-ratio changes are minor vs.
-                            // the homography but useful as a rough fallback.
                             val facadeCalc = remember { SpeedCalculator() }
                             CalibrationSettingsScreen(
                                 speedCalculator = facadeCalc,
@@ -145,13 +182,15 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // ── New calibration wizard ─────────────────────────────────────
+                        // ── New calibration wizard ────────────────────────────────────
                         AnimatedVisibility(visible = showCalibrationWizard) {
                             CalibrationWizardScreen(
                                 frozenFrame = frozen,
                                 onCaptureFrame = { captureNextFrame.value = true },
                                 onSaveProfile = { profile ->
                                     vehicleTracker.loadCalibrationProfile(profile)
+                                    // Keep local state in sync so the grid updates instantly
+                                    activeCalibrationProfile = profile
                                     showCalibrationWizard = false
                                 },
                                 onDismiss = {
@@ -272,7 +311,6 @@ class VehicleAnalyzer(
             try {
                 val detectedObjects = objectDetector.detectVehicles(bitmap)
 
-                // Build (trackingId, boundingBox) pairs — only for vehicle-classified objects
                 val vehicleDetections = detectedObjects
                     .filter { obj ->
                         obj.labels.any {
@@ -286,18 +324,15 @@ class VehicleAnalyzer(
                         Pair(id, obj.boundingBox)
                     }
 
-                // Update tracker — get per-vehicle speeds
                 val trackSpeeds = vehicleTracker.update(
                     detections = vehicleDetections,
                     imageWidth  = imageWidth,
                     timestampMs = timestampMs
                 )
 
-                // HUD shows the highest speed currently detected
                 val maxSpeed = trackSpeeds.values.maxOrNull() ?: 0.0
                 vehicleSpeed.value = maxSpeed
 
-                // Pass full object list + speeds to overlay
                 overlay.setDetectedObjects(
                     objects     = detectedObjects,
                     imageWidth  = imageWidth,
