@@ -1,7 +1,9 @@
 package com.example.roadradar
 
 import android.annotation.SuppressLint
-import android.graphics.Rect
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -16,24 +18,14 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -46,77 +38,169 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.roadradar.ui.theme.RoadRadarTheme
-import com.google.mlkit.vision.objects.DetectedObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+private const val PREFS_UI     = "road_radar_ui_prefs"
+private const val KEY_SHOW_GRID = "show_calibration_grid"
+
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var objectDetector: ObjectDetector
-    private val vehicleSpeed = MutableStateFlow(0.0)
-    private val speedCalculator = SpeedCalculator()
+    private val vehicleTracker = VehicleTracker()
     private lateinit var overlay: BoundingBoxOverlay
+
+    val frozenFrame      = MutableStateFlow<Bitmap?>(null)
+    val captureNextFrame = MutableStateFlow(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         cameraExecutor = Executors.newSingleThreadExecutor()
         objectDetector = ObjectDetector()
-        overlay = BoundingBoxOverlay(this)
+        overlay        = BoundingBoxOverlay(this)
+
+        CalibrationProfileStore.loadActive(this)?.let { profile ->
+            vehicleTracker.loadCalibrationProfile(profile)
+        }
 
         setContent {
             RoadRadarTheme {
-                var showCalibrationScreen by remember { mutableStateOf(false) }
+                val context = LocalContext.current
+                val uiPrefs = remember { context.getSharedPreferences(PREFS_UI, Context.MODE_PRIVATE) }
 
-                Scaffold(modifier = Modifier.fillMaxSize()){ innerPadding ->
+                var showCalibrationWizard    by remember { mutableStateOf(false) }
+                var showProfileManager       by remember { mutableStateOf(false) }
+                var showCalibrationGrid      by remember { mutableStateOf(uiPrefs.getBoolean(KEY_SHOW_GRID, false)) }
+                var activeCalibrationProfile by remember { mutableStateOf<CalibrationProfile?>(null) }
+                val frozen by frozenFrame.collectAsState()
+
+                LaunchedEffect(Unit) {
+                    activeCalibrationProfile = CalibrationProfileStore.loadActive(context)
+                }
+
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
-                        CameraPreview(
-                            cameraExecutor = cameraExecutor,
-                            objectDetector = objectDetector,
-                            speedCalculator = speedCalculator,
-                            vehicleSpeed = vehicleSpeed,
-                            overlay = overlay
+
+                        // ── Camera feed ──────────────────────────────────────
+                        CameraPreviewComposable(
+                            cameraExecutor   = cameraExecutor,
+                            objectDetector   = objectDetector,
+                            vehicleTracker   = vehicleTracker,
+                            overlay          = overlay,
+                            captureNextFrame = captureNextFrame,
+                            onFrameCaptured  = { bmp -> frozenFrame.value = bmp }
                         )
+
+                        // ── Bounding-box overlay ──────────────────────────────
                         AndroidView(
-                            factory = { context -> overlay },
-                            modifier = Modifier.matchParentSize() // Make overlay fill the same space as the preview
+                            factory  = { _ -> overlay },
+                            modifier = Modifier.matchParentSize()
                         )
-                        SpeedDisplay(vehicleSpeed)
-                        // Calibration button
+
+                        // ── Calibration grid ─────────────────────────────────
+                        if (showCalibrationGrid) {
+                            CalibrationGridOverlay(
+                                profile  = activeCalibrationProfile,
+                                modifier = Modifier.matchParentSize()
+                            )
+                        }
+
+                        // ── Confidence badge (top-left) ───────────────────────
+                        activeCalibrationProfile?.let { profile ->
+                            CalibrationConfidenceBadge(
+                                profile  = profile,
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(top = 12.dp, start = 12.dp)
+                            )
+                        }
+
+                        // ── Toolbar: Grid | Profiles | Wizard (top-right) ─────
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .padding(16.dp)
+                                .padding(top = 8.dp, end = 8.dp)
                         ) {
-                            IconButton(onClick = { showCalibrationScreen = !showCalibrationScreen }) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Calibration Settings",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(32.dp)
-                                )
+                            Row {
+                                // Grid toggle
+                                IconButton(
+                                    onClick = {
+                                        val next = !showCalibrationGrid
+                                        showCalibrationGrid = next
+                                        uiPrefs.edit().putBoolean(KEY_SHOW_GRID, next).apply()
+                                    },
+                                    enabled = activeCalibrationProfile != null
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.GridOn,
+                                        contentDescription = "Toggle calibration grid",
+                                        tint = when {
+                                            activeCalibrationProfile == null -> Color.Gray
+                                            showCalibrationGrid             -> Color.Cyan
+                                            else                            -> Color.White
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                // Profile manager
+                                IconButton(onClick = { showProfileManager = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.List,
+                                        contentDescription = "Manage profiles",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                // Calibration wizard
+                                IconButton(onClick = { showCalibrationWizard = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Star,
+                                        contentDescription = "Calibration Wizard",
+                                        tint = Color.Yellow,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                             }
                         }
 
-                        // Calibration Settings Screen (conditionally displayed)
-                        AnimatedVisibility(visible = showCalibrationScreen) {
-                            // Ensure you have defined CalibrationSettingsScreen composable
-                            CalibrationSettingsScreen(
-                                speedCalculator = speedCalculator,
-                                onBackPressed = { showCalibrationScreen = false }
+                        // ── Calibration wizard ────────────────────────────────
+                        AnimatedVisibility(visible = showCalibrationWizard) {
+                            CalibrationWizardScreen(
+                                frozenFrame    = frozen,
+                                onCaptureFrame = { captureNextFrame.value = true },
+                                onSaveProfile  = { profile ->
+                                    vehicleTracker.loadCalibrationProfile(profile)
+                                    activeCalibrationProfile = profile
+                                    showCalibrationWizard    = false
+                                },
+                                onDismiss = {
+                                    frozenFrame.value     = null
+                                    showCalibrationWizard = false
+                                }
+                            )
+                        }
 
+                        // ── Profile manager ───────────────────────────────────
+                        AnimatedVisibility(visible = showProfileManager) {
+                            CalibrationProfileManagerScreen(
+                                activeProfileName = activeCalibrationProfile?.name,
+                                onActivate        = { profile ->
+                                    vehicleTracker.loadCalibrationProfile(profile)
+                                    activeCalibrationProfile = profile
+                                    showProfileManager       = false
+                                },
+                                onBack = { showProfileManager = false }
                             )
                         }
                     }
                 }
             }
         }
-
     }
 
     override fun onDestroy() {
@@ -125,79 +209,68 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/*@Composable
-fun CalibrationControls(
-speedCalculator: SpeedCalculator,
-    modifier: Modifier = Modifier
-) {
-    var calibrationValue by remember { mutableStateOf(100f) }
-
-    Column(modifier = modifier.background(Color.White.copy(alpha = 0.7f))) {
-        Text("Calibration (px/meter)")
-        Slider(
-            value = calibrationValue,
-            onValueChange = {
-                calibrationValue = it
-                speedCalculator.setCalibration(it)
-            },
-            valueRange = 50f..500f
-        )
-        Text("%.1f px/m".format(calibrationValue))
-    }
-}
-*/
+// ── Confidence badge ───────────────────────────────────────────────────────────────
 
 @Composable
-private fun CameraPreview(
+fun CalibrationConfidenceBadge(profile: CalibrationProfile, modifier: Modifier = Modifier) {
+    val color = qualityColor(profile.reprojectionErrorPx)
+    val label = qualityLabel(profile.reprojectionErrorPx)
+    Row(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.52f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
+        Text(profile.name,  fontSize = 11.sp, color = Color.White,  fontWeight = FontWeight.Medium, maxLines = 1)
+        Text("· $label",    fontSize = 11.sp, color = color,         fontWeight = FontWeight.SemiBold)
+    }
+}
+
+// ── Camera preview ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun CameraPreviewComposable(
     cameraExecutor: ExecutorService,
     objectDetector: ObjectDetector,
-    speedCalculator: SpeedCalculator,
-    vehicleSpeed: MutableStateFlow<Double>,
-    overlay: BoundingBoxOverlay
+    vehicleTracker: VehicleTracker,
+    overlay: BoundingBoxOverlay,
+    captureNextFrame: MutableStateFlow<Boolean>,
+    onFrameCaptured: (Bitmap) -> Unit
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
-
-    // Remember the camera provider to properly manage its lifecycle
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
 
     DisposableEffect(lifecycleOwner) {
         onDispose {
-            // Ensure we clean up when this composable is disposed
-            try {
-                val cameraProvider = cameraProviderFuture.get()
-                cameraProvider.unbindAll()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            try { cameraProviderFuture.get().unbindAll() } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     AndroidView(
         factory = { ctx ->
             val previewView = PreviewView(ctx)
-
-
             cameraProviderFuture.addListener({
                 try {
                     val cameraProvider = cameraProviderFuture.get()
-
-                    // Set up the preview use case
                     val preview = CameraPreview.Builder().build().apply {
                         setSurfaceProvider(previewView.surfaceProvider)
                     }
-                    // Set up the image analysis use case
                     val imageAnalysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
-                        .also {
-                            it.setAnalyzer(cameraExecutor, VehicleAnalyzer(objectDetector, speedCalculator, vehicleSpeed, overlay))
+                        .also { analysis ->
+                            analysis.setAnalyzer(
+                                cameraExecutor,
+                                VehicleAnalyzer(
+                                    objectDetector, vehicleTracker, overlay,
+                                    captureNextFrame, onFrameCaptured
+                                )
+                            )
                         }
-
-                    // Unbind any bound use cases before rebinding
                     cameraProvider.unbindAll()
-
-                    // Bind use cases to camera
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
@@ -206,192 +279,96 @@ private fun CameraPreview(
                     )
                 } catch (e: Exception) {
                     Toast.makeText(ctx, "Camera error: ${e.message}", Toast.LENGTH_SHORT).show()
-                    e.printStackTrace()
                 }
             }, ContextCompat.getMainExecutor(ctx))
-
             previewView
         }
     )
 }
-@SuppressLint("DefaultLocale")
-@Composable
-fun SpeedDisplay(vehicleSpeed: StateFlow<Double>) {
-    val speed by vehicleSpeed.collectAsState()
 
-    Box(
-        contentAlignment = Alignment.BottomCenter,
-        modifier = Modifier.fillMaxSize()
-    ) {
-        Text(
-            text = "${String.format("%.1f", speed)} km/h",
-            color = Color.White,
-            fontSize = 32.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 32.dp)
-        )
-    }
-}
+// ── Vehicle analyzer ────────────────────────────────────────────────────────────────
 
 class VehicleAnalyzer(
     private val objectDetector: ObjectDetector,
-    private val speedCalculator: SpeedCalculator,
-    private val vehicleSpeed: MutableStateFlow<Double>,
-    private val overlay: BoundingBoxOverlay
+    private val vehicleTracker: VehicleTracker,
+    private val overlay: BoundingBoxOverlay,
+    private val captureNextFrame: MutableStateFlow<Boolean>,
+    private val onFrameCaptured: (Bitmap) -> Unit
 ) : ImageAnalysis.Analyzer {
 
-    private var lastFrameTimestamp: Long = 0
-    private var lastVehicleBoundingBox: Rect? = null
-
-
     override fun analyze(imageProxy: ImageProxy) {
-        val currentTimestamp = System.currentTimeMillis()
-        val bitmap = imageProxy.toBitmap()  // Convert ImageProxy to Bitmap
-        val imageWidth = imageProxy.width
+        val timestampMs = System.currentTimeMillis()
+        val bitmap      = imageProxy.toBitmap()
+        val imageWidth  = imageProxy.width
         val imageHeight = imageProxy.height
+
+        if (captureNextFrame.value) {
+            captureNextFrame.value = false
+            val rotated = rotateBitmapForDisplay(
+                bitmap,
+                imageProxy.imageInfo.rotationDegrees
+            )
+            onFrameCaptured(rotated)
+        }
 
         CoroutineScope(Dispatchers.Default).launch {
             try {
                 val detectedObjects = objectDetector.detectVehicles(bitmap)
-                overlay.setDetectedObjects(detectedObjects, imageWidth, imageHeight)
-                // Look for the largest vehicle in the frame (likely the closest one)
-                val largestVehicle = findLargestVehicle(detectedObjects)
-
-                // If we found a vehicle, calculate its speed
-                largestVehicle?.let { vehicle : DetectedObject ->
-                    val boundingBox = vehicle.boundingBox
-
-                    // If we have a previous bounding box, we can calculate speed
-                    lastVehicleBoundingBox?.let { lastBox ->
-                        if (lastFrameTimestamp > 0) {
-                            val timeDelta = (currentTimestamp - lastFrameTimestamp) / 1000.0 // Convert to seconds
-
-                            // Calculate speed based on change in bounding box
-                            val speed = speedCalculator.calculateSpeed(
-                                previousBox = lastBox,
-                                currentBox = boundingBox,
-                                imageWidth = imageProxy.width,
-                                timeDeltaSeconds = timeDelta
-                            )
-
-                            vehicleSpeed.value = speed
+                val vehicleDetections = detectedObjects
+                    .filter { obj ->
+                        obj.labels.any {
+                            (it.text.lowercase() == "object" ||
+                             it.text.lowercase() == "truck"  ||
+                             it.text.lowercase() == "bus")   && it.confidence > 0.6f
                         }
                     }
-
-                    // Update last bounding box and timestamp
-                    lastVehicleBoundingBox = boundingBox
-                    lastFrameTimestamp = currentTimestamp
-                } ?: run {
-                    // No vehicle detected in this frame
-                    if (currentTimestamp - lastFrameTimestamp > 2000) { // Reset after 2 seconds with no detection
-                        lastVehicleBoundingBox = null
-                        vehicleSpeed.value = 0.0
+                    .mapNotNull { obj ->
+                        val id = obj.trackingId ?: return@mapNotNull null
+                        Pair(id, obj.boundingBox)
                     }
-                }
+
+                val trackSpeeds = vehicleTracker.update(
+                    detections  = vehicleDetections,
+                    imageWidth  = imageWidth,
+                    timestampMs = timestampMs
+                )
+
+                overlay.setDetectedObjects(
+                    objects     = detectedObjects,
+                    imageWidth  = imageWidth,
+                    imageHeight = imageHeight,
+                    speeds      = trackSpeeds
+                )
             } catch (e: Exception) {
                 Log.e("VehicleAnalyzer", "Error analyzing image", e)
             } finally {
-                imageProxy.close()  // Always close the image!
+                imageProxy.close()
             }
-        }
-    }
-
-    // Find the largest detected vehicle in the frame (likely the closest one)
-    private fun findLargestVehicle(objects: List<DetectedObject>): DetectedObject? {
-        var largestVehicle: DetectedObject? = null
-        var largestArea = 0
-
-        objects.forEach { obj ->
-            // Check if this is a vehicle
-            val isVehicle = obj.labels.any {
-                (it.text.lowercase() == "object" ||
-                        it.text.lowercase() == "truck" ||
-                        it.text.lowercase() == "bus") &&
-                        it.confidence > 0.6f
-            }
-
-            if (isVehicle) {
-                val box = obj.boundingBox
-                val area = box.width() * box.height()
-
-                if (area > largestArea) {
-                    largestArea = area
-                    largestVehicle = obj
-                }
-            }
-        }
-
-        return largestVehicle
-    }
-
-}
-
-@Composable
-fun PreviewCameraPreview() {
-    // Simulated camera preview area
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.DarkGray.copy(alpha = 0.7f)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "Camera Preview Simulation",
-                color = Color.White,
-                fontSize = 16.sp
-            )
         }
     }
 }
+
+/**
+ * Rotates [bitmap] by [rotationDegrees] (as reported by CameraX ImageProxy)
+ * so the image is correctly oriented for portrait display.
+ */
+fun rotateBitmapForDisplay(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+    if (rotationDegrees == 0) return bitmap
+    val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
+// ── Compose previews ─────────────────────────────────────────────────────────────────
 
 @Preview(showBackground = true, device = "id:pixel_5")
 @Composable
 fun DefaultPreview() {
-    val simulatedSpeed = remember { MutableStateFlow(72.5) }
-
     RoadRadarTheme {
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Simulated camera preview
-            PreviewCameraPreview()
-
-            // Speed display overlay
-            SpeedDisplay(vehicleSpeed = simulatedSpeed)
-
-            // Add additional UI elements that exist in your real app
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(16.dp)
-            ) {
-                Text(
-                    text = "RoadRadar",
-                    color = Color.White,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            // Add calibration mock button
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(16.dp)
-                    .background(
-                        Color.White.copy(alpha = 0.3f),
-                        shape = RoundedCornerShape(8.dp)
-                    )
-            ) {
-                Text(
-                    text = "Calibrate",
-                    modifier = Modifier.padding(8.dp),
-                    color = Color.White
-                )
-            }
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("RoadRadar", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

@@ -3,45 +3,64 @@ package com.example.roadradar
 import android.graphics.Rect
 import android.util.Log
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * Handles vehicle speed calculation logic based on changes in bounding box dimensions
- * and positions between frames
+ * Calculates vehicle speed using a perspective-correct homography transform.
+ *
+ * When a [CalibrationProfile] is loaded, bounding-box centres are first
+ * projected from image-pixel space onto the road plane (in metres) before
+ * computing the displacement, giving physically meaningful distance values
+ * regardless of camera angle or height.
+ *
+ * If no homography is available, the calculator falls back to the original
+ * pixel-ratio method so the app is still usable before calibration.
+ *
+ * Each vehicle track should use its own [SpeedCalculator] instance so that
+ * speed histories are never mixed across different objects.
  */
 class SpeedCalculator {
 
-    /**
-     * Calibration constants - these would be adjusted based on camera positioning,
-     * lens characteristics, and real-world testing
-     */
-    private var VEHICLE_WIDTH_METERS = 1.8f     // Average vehicle width in meters
-    private var CAMERA_HEIGHT_METERS = 1.5f     // Height of camera above ground
-    private var PIXEL_TO_METER_RATIO = 100f     // Default calibration factor - pixels per meter
+    // ── Fallback (legacy) calibration ────────────────────────────────────────
+    private var PIXEL_TO_METER_RATIO = 100f
 
-    // Smoothing factor for speed calculations (0.0-1.0)
-    // Lower value = more smoothing
+    // ── Homography-based calibration ─────────────────────────────────────────
+    private var homographyMatrix: FloatArray? = null
+
+    // ── Smoothing & filtering ─────────────────────────────────────────────────
     private var SMOOTHING_FACTOR = 0.3f
+    private var maxSpeedChangePct = 0.5   // Reject jumps > 50% of last speed
 
-    // Store previous measurements for smoothing and filtering
     private var lastCalculatedSpeed = 0.0
     private val speedHistory = mutableListOf<Double>()
-    private val maxHistorySize = 5 // Number of speed readings to keep for filtering
+    private val maxHistorySize = 5
 
-    // Speed threshold for outlier rejection (km/h)
-    private val maxSpeedChange = 20.0
+    // ─────────────────────────────────────────────────────────────────────────
+    // Public API
+    // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Calculate vehicle speed based on changes in bounding box
+     * Load a saved calibration profile. Once set, all speed calculations use
+     * perspective-correct homography instead of the flat pixel ratio.
+     */
+    fun loadCalibrationProfile(profile: CalibrationProfile) {
+        homographyMatrix = profile.homography
+        Log.i("SpeedCalculator", "Loaded calibration profile '${profile.name}' " +
+                "(reprojErr=${profile.reprojectionErrorPx} px)")
+    }
+
+    fun clearCalibrationProfile() {
+        homographyMatrix = null
+    }
+
+    /**
+     * Calculate speed from two consecutive bounding boxes.
      *
-     * @param previousBox The vehicle's bounding box in the previous frame
-     * @param currentBox The vehicle's bounding box in the current frame
-     * @param imageWidth Width of the camera image in pixels
-     * @param imageHeight Height of the camera image in pixels
-     * @param timeDeltaSeconds Time between frames in seconds
-     * @return Estimated speed in km/h
+     * @param previousBox       Bounding box in the previous frame (image pixels)
+     * @param currentBox        Bounding box in the current frame (image pixels)
+     * @param imageWidth        Camera image width in pixels
+     * @param timeDeltaSeconds  Elapsed time between the two frames
+     * @return Smoothed speed in km/h
      */
     fun calculateSpeed(
         previousBox: Rect,
@@ -51,110 +70,78 @@ class SpeedCalculator {
     ): Double {
         if (timeDeltaSeconds <= 0) return lastCalculatedSpeed
 
-        // Calculate the center points of both boxes
-        val prevCenterX = previousBox.exactCenterX()
-        val prevCenterY = previousBox.exactCenterY()
-        val currentCenterX = currentBox.exactCenterX()
-        val currentCenterY = currentBox.exactCenterY()
-
-        // Calculate pixel movement
-        val deltaX = currentCenterX - prevCenterX
-        val deltaY = currentCenterY - prevCenterY
-        val pixelDistance = sqrt(deltaX.pow(2) + deltaY.pow(2))
-
-        // Get real-world distance using calibration factor (convert pixels to meters)
-        val distanceMeters = pixelDistance / PIXEL_TO_METER_RATIO
-
-        // Alternative calculation using apparent size
-        // Size-based approach is often more accurate for objects moving toward/away from camera
-        val prevWidth = previousBox.width().toFloat()
-        val currentWidth = currentBox.width().toFloat()
-
-        // Calculate potential distance using size change
-        // Only use if significant size change detected
-        val sizeRatio = if (prevWidth > 0 && currentWidth > 0) prevWidth / currentWidth else 1f
-        val sizeBasedDistance = if (abs(sizeRatio - 1f) > 0.02f) {
-            VEHICLE_WIDTH_METERS * abs(sizeRatio - 1f) * (imageWidth / max(prevWidth, currentWidth))
+        val distanceMeters = if (homographyMatrix != null) {
+            homographyDistance(previousBox, currentBox)
         } else {
-            // Default to basic pixel distance if size change is minimal
-            distanceMeters
+            pixelDistance(previousBox, currentBox)
         }
 
-        // Combine both methods, favoring size-based for front/rear movement
-        // and pixel-based for lateral movement
-        val estimatedDistanceMeters = distanceMeters * 0.7 + sizeBasedDistance * 0.3
-
-        // Calculate speed in m/s
-        val speedMps = estimatedDistanceMeters / timeDeltaSeconds
-
-        // Convert to km/h
+        val speedMps   = distanceMeters / timeDeltaSeconds
         val rawSpeedKmh = speedMps * 3.6
 
-        // Filter out unrealistic speed changes (outliers)
-        val filteredSpeed = if (lastCalculatedSpeed > 0 &&
-            abs(rawSpeedKmh - lastCalculatedSpeed) > maxSpeedChange) {
+        // Outlier rejection — reject implausible jumps relative to last reading
+        val filteredSpeed = if (lastCalculatedSpeed > 5.0 &&
+            abs(rawSpeedKmh - lastCalculatedSpeed) > lastCalculatedSpeed * maxSpeedChangePct) {
             lastCalculatedSpeed
         } else {
             rawSpeedKmh
         }
 
-        // Add to history for further filtering
         speedHistory.add(filteredSpeed)
-        if (speedHistory.size > maxHistorySize) {
-            speedHistory.removeAt(0)
-        }
+        if (speedHistory.size > maxHistorySize) speedHistory.removeAt(0)
 
-        // Calculate median speed from history (more robust than average)
-        val sortedSpeeds = speedHistory.sorted()
-        val medianSpeed = if (speedHistory.size % 2 == 0) {
-            val mid = speedHistory.size / 2
-            (sortedSpeeds[mid - 1] + sortedSpeeds[mid]) / 2
-        } else {
-            sortedSpeeds[speedHistory.size / 2]
-        }
-        Log.d("SpeedCalc", "Pixel distance: $pixelDistance, Distance meters: $distanceMeters, Time delta: $timeDeltaSeconds, Raw speed: $rawSpeedKmh")
-        // Apply exponential smoothing
-        val smoothedSpeed = lastCalculatedSpeed * (1 - SMOOTHING_FACTOR) + medianSpeed * SMOOTHING_FACTOR
+        val medianSpeed = median(speedHistory)
+        val smoothed = lastCalculatedSpeed * (1 - SMOOTHING_FACTOR) + medianSpeed * SMOOTHING_FACTOR
+        lastCalculatedSpeed = smoothed
 
-        // Store for next calculation
-        lastCalculatedSpeed = smoothedSpeed
-
-        return smoothedSpeed
+        Log.d("SpeedCalc", "dist=${"%.3f".format(distanceMeters)}m " +
+                "raw=${"%.1f".format(rawSpeedKmh)} smooth=${"%.1f".format(smoothed)} km/h")
+        return smoothed
     }
 
-    /**
-     * Reset the speed calculator state
-     */
     fun reset() {
         lastCalculatedSpeed = 0.0
         speedHistory.clear()
     }
 
-    /**
-     * Set calibration factor (pixels per meter)
-     */
-    fun setCalibration(pixelsPerMeter: Float) {
-        this.PIXEL_TO_METER_RATIO = pixelsPerMeter
+    // ── Legacy setters (kept for backward-compat with CalibrationSettingsScreen) ──
+    fun setCalibration(pixelsPerMeter: Float)  { PIXEL_TO_METER_RATIO = pixelsPerMeter }
+    fun setVehicleWidth(widthMeters: Float)    { /* absorbed into homography */ }
+    fun setCameraHeight(heightMeters: Float)   { /* absorbed into homography */ }
+    fun setSmoothingFactor(factor: Float)      { SMOOTHING_FACTOR = factor.coerceIn(0.1f, 1.0f) }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun homographyDistance(prev: Rect, curr: Rect): Double {
+        val H = homographyMatrix!!
+        val prevWorld = HomographyCalibrator.transform(
+            H, HomographyCalibrator.Point2f(prev.exactCenterX(), prev.exactCenterY())
+        )
+        val currWorld = HomographyCalibrator.transform(
+            H, HomographyCalibrator.Point2f(curr.exactCenterX(), curr.exactCenterY())
+        )
+        val dx = (currWorld.x - prevWorld.x).toDouble()
+        val dy = (currWorld.y - prevWorld.y).toDouble()
+        return sqrt(dx * dx + dy * dy)
     }
 
-    /**
-     * Set average vehicle width used for calculation
-     */
-    fun setVehicleWidth(widthMeters: Float) {
-        this.VEHICLE_WIDTH_METERS = widthMeters
+    private fun pixelDistance(prev: Rect, curr: Rect): Double {
+        val deltaX = (curr.exactCenterX() - prev.exactCenterX()).toDouble()
+        val deltaY = (curr.exactCenterY() - prev.exactCenterY()).toDouble()
+        val pixelDist = sqrt(deltaX * deltaX + deltaY * deltaY)
+        return pixelDist / PIXEL_TO_METER_RATIO
     }
 
-    /**
-     * Set camera height from ground
-     */
-    fun setCameraHeight(heightMeters: Float) {
-        this.CAMERA_HEIGHT_METERS = heightMeters
-    }
-
-    /**
-     * Set smoothing factor
-     */
-    fun setSmoothingFactor(factor: Float) {
-        this.SMOOTHING_FACTOR = factor.coerceIn(0.1f, 1.0f)
+    private fun median(list: List<Double>): Double {
+        if (list.isEmpty()) return 0.0
+        val sorted = list.sorted()
+        return if (sorted.size % 2 == 0) {
+            val mid = sorted.size / 2
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[sorted.size / 2]
+        }
     }
 }
