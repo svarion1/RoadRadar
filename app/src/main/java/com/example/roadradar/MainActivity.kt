@@ -20,6 +20,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
@@ -158,7 +159,7 @@ class MainActivity : ComponentActivity() {
                                 // Profile manager
                                 IconButton(onClick = { showProfileManager = true }) {
                                     Icon(
-                                        imageVector = Icons.Default.List,
+                                        imageVector = Icons.AutoMirrored.Filled.List,
                                         contentDescription = "Manage profiles",
                                         tint = Color.White,
                                         modifier = Modifier.size(28.dp)

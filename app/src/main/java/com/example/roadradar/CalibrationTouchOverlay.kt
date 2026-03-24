@@ -1,5 +1,6 @@
 package com.example.roadradar
 
+import android.graphics.Color.WHITE
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.fillMaxSize
@@ -95,17 +96,17 @@ fun CalibrationTouchOverlay(
 
         // Draw pin circles and labels
         offsets.forEachIndexed { i, offset ->
-            val color = pinColors[i]
-            drawCircle(color = color.copy(alpha = 0.3f), radius = rPx, center = offset)
+            val pinColor = pinColors[i]
+            drawCircle(color = pinColor.copy(alpha = 0.3f), radius = rPx, center = offset)
             drawCircle(
-                color = color,
+                color = pinColor,
                 radius = rPx,
                 center = offset,
                 style = Stroke(width = 3.dp.toPx())
             )
             // Cross-hair
-            drawLine(color, offset.copy(y = offset.y - rPx * 0.6f), offset.copy(y = offset.y + rPx * 0.6f), 2.dp.toPx())
-            drawLine(color, offset.copy(x = offset.x - rPx * 0.6f), offset.copy(x = offset.x + rPx * 0.6f), 2.dp.toPx())
+            drawLine(pinColor, offset.copy(y = offset.y - rPx * 0.6f), offset.copy(y = offset.y + rPx * 0.6f), 2.dp.toPx())
+            drawLine(pinColor, offset.copy(x = offset.x - rPx * 0.6f), offset.copy(x = offset.x + rPx * 0.6f), 2.dp.toPx())
 
             // Label
             drawContext.canvas.nativeCanvas.drawText(
@@ -114,7 +115,7 @@ fun CalibrationTouchOverlay(
                 offset.y + 6.dp.toPx(),
                 NativePaint().apply {
                     textSize = 14.sp.toPx()
-                    color = android.graphics.Color.WHITE
+                    this.color = android.graphics.Color.WHITE
                     isFakeBoldText = true
                     setShadowLayer(3f, 1f, 1f, android.graphics.Color.BLACK)
                 }

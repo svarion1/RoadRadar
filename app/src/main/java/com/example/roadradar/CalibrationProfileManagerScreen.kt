@@ -10,7 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,7 +20,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 
 /**
  * Full-screen profile manager.
@@ -140,7 +139,7 @@ private fun ProfileCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Icon(
-                    imageVector = if (isActive) Icons.Filled.Star else Icons.Outlined.StarOutline,
+                    imageVector = if (isActive) Icons.Filled.Star else Icons.Outlined.Star,
                     contentDescription = null,
                     tint = if (isActive) Color(0xFFFFC107) else Color.Gray,
                     modifier = Modifier.size(20.dp)
