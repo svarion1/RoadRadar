@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -42,18 +41,16 @@ import com.example.roadradar.ui.theme.RoadRadarTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-private const val PREFS_UI    = "road_radar_ui_prefs"
+private const val PREFS_UI     = "road_radar_ui_prefs"
 private const val KEY_SHOW_GRID = "show_calibration_grid"
 
 class MainActivity : ComponentActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var objectDetector: ObjectDetector
-    private val vehicleSpeed   = MutableStateFlow(0.0)
     private val vehicleTracker = VehicleTracker()
     private lateinit var overlay: BoundingBoxOverlay
 
@@ -76,7 +73,6 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val uiPrefs = remember { context.getSharedPreferences(PREFS_UI, Context.MODE_PRIVATE) }
 
-                var showCalibrationSettings  by remember { mutableStateOf(false) }
                 var showCalibrationWizard    by remember { mutableStateOf(false) }
                 var showProfileManager       by remember { mutableStateOf(false) }
                 var showCalibrationGrid      by remember { mutableStateOf(uiPrefs.getBoolean(KEY_SHOW_GRID, false)) }
@@ -90,21 +86,23 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Box(modifier = Modifier.padding(innerPadding)) {
 
+                        // ── Camera feed ──────────────────────────────────────
                         CameraPreviewComposable(
                             cameraExecutor   = cameraExecutor,
                             objectDetector   = objectDetector,
                             vehicleTracker   = vehicleTracker,
-                            vehicleSpeed     = vehicleSpeed,
                             overlay          = overlay,
                             captureNextFrame = captureNextFrame,
                             onFrameCaptured  = { bmp -> frozenFrame.value = bmp }
                         )
 
+                        // ── Bounding-box overlay ──────────────────────────────
                         AndroidView(
                             factory  = { _ -> overlay },
                             modifier = Modifier.matchParentSize()
                         )
 
+                        // ── Calibration grid ─────────────────────────────────
                         if (showCalibrationGrid) {
                             CalibrationGridOverlay(
                                 profile  = activeCalibrationProfile,
@@ -112,8 +110,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        SpeedDisplay(vehicleSpeed)
-
+                        // ── Confidence badge (top-left) ───────────────────────
                         activeCalibrationProfile?.let { profile ->
                             CalibrationConfidenceBadge(
                                 profile  = profile,
@@ -123,12 +120,14 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
+                        // ── Toolbar: Grid | Profiles | Wizard (top-right) ─────
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
                                 .padding(top = 8.dp, end = 8.dp)
                         ) {
                             Row {
+                                // Grid toggle
                                 IconButton(
                                     onClick = {
                                         val next = !showCalibrationGrid
@@ -148,6 +147,7 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
+                                // Profile manager
                                 IconButton(onClick = { showProfileManager = true }) {
                                     Icon(
                                         imageVector = Icons.Default.List,
@@ -156,6 +156,7 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
+                                // Calibration wizard
                                 IconButton(onClick = { showCalibrationWizard = true }) {
                                     Icon(
                                         imageVector = Icons.Default.Star,
@@ -164,25 +165,10 @@ class MainActivity : ComponentActivity() {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
-                                IconButton(onClick = { showCalibrationSettings = !showCalibrationSettings }) {
-                                    Icon(
-                                        imageVector = Icons.Default.Settings,
-                                        contentDescription = "Calibration Settings",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                }
                             }
                         }
 
-                        AnimatedVisibility(visible = showCalibrationSettings) {
-                            val facadeCalc = remember { SpeedCalculator() }
-                            CalibrationSettingsScreen(
-                                speedCalculator = facadeCalc,
-                                onBackPressed   = { showCalibrationSettings = false }
-                            )
-                        }
-
+                        // ── Calibration wizard ────────────────────────────────
                         AnimatedVisibility(visible = showCalibrationWizard) {
                             CalibrationWizardScreen(
                                 frozenFrame    = frozen,
@@ -199,6 +185,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
+                        // ── Profile manager ───────────────────────────────────
                         AnimatedVisibility(visible = showProfileManager) {
                             CalibrationProfileManagerScreen(
                                 activeProfileName = activeCalibrationProfile?.name,
@@ -236,7 +223,7 @@ fun CalibrationConfidenceBadge(profile: CalibrationProfile, modifier: Modifier =
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Box(modifier = Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
-        Text(profile.name,  fontSize = 11.sp, color = Color.White,  fontWeight = FontWeight.Medium,    maxLines = 1)
+        Text(profile.name,  fontSize = 11.sp, color = Color.White,  fontWeight = FontWeight.Medium, maxLines = 1)
         Text("· $label",    fontSize = 11.sp, color = color,         fontWeight = FontWeight.SemiBold)
     }
 }
@@ -248,7 +235,6 @@ private fun CameraPreviewComposable(
     cameraExecutor: ExecutorService,
     objectDetector: ObjectDetector,
     vehicleTracker: VehicleTracker,
-    vehicleSpeed: MutableStateFlow<Double>,
     overlay: BoundingBoxOverlay,
     captureNextFrame: MutableStateFlow<Boolean>,
     onFrameCaptured: (Bitmap) -> Unit
@@ -279,7 +265,7 @@ private fun CameraPreviewComposable(
                             analysis.setAnalyzer(
                                 cameraExecutor,
                                 VehicleAnalyzer(
-                                    objectDetector, vehicleTracker, vehicleSpeed, overlay,
+                                    objectDetector, vehicleTracker, overlay,
                                     captureNextFrame, onFrameCaptured
                                 )
                             )
@@ -300,27 +286,11 @@ private fun CameraPreviewComposable(
     )
 }
 
-// ── Speed HUD ──────────────────────────────────────────────────────────────────────
-
-@SuppressLint("DefaultLocale")
-@Composable
-fun SpeedDisplay(vehicleSpeed: StateFlow<Double>) {
-    val speed by vehicleSpeed.collectAsState()
-    Box(contentAlignment = Alignment.BottomCenter, modifier = Modifier.fillMaxSize()) {
-        Text(
-            text = "${String.format("%.1f", speed)} km/h",
-            color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 32.dp)
-        )
-    }
-}
-
 // ── Vehicle analyzer ────────────────────────────────────────────────────────────────
 
 class VehicleAnalyzer(
     private val objectDetector: ObjectDetector,
     private val vehicleTracker: VehicleTracker,
-    private val vehicleSpeed: MutableStateFlow<Double>,
     private val overlay: BoundingBoxOverlay,
     private val captureNextFrame: MutableStateFlow<Boolean>,
     private val onFrameCaptured: (Bitmap) -> Unit
@@ -334,9 +304,6 @@ class VehicleAnalyzer(
 
         if (captureNextFrame.value) {
             captureNextFrame.value = false
-            // Rotate the bitmap so it is upright on the portrait screen.
-            // CameraX reports rotation in degrees; we apply the same rotation
-            // to the captured Bitmap so the wizard always shows a portrait image.
             val rotated = rotateBitmapForDisplay(
                 bitmap,
                 imageProxy.imageInfo.rotationDegrees
@@ -359,12 +326,13 @@ class VehicleAnalyzer(
                         val id = obj.trackingId ?: return@mapNotNull null
                         Pair(id, obj.boundingBox)
                     }
+
                 val trackSpeeds = vehicleTracker.update(
                     detections  = vehicleDetections,
                     imageWidth  = imageWidth,
                     timestampMs = timestampMs
                 )
-                vehicleSpeed.value = trackSpeeds.values.maxOrNull() ?: 0.0
+
                 overlay.setDetectedObjects(
                     objects     = detectedObjects,
                     imageWidth  = imageWidth,
@@ -383,7 +351,6 @@ class VehicleAnalyzer(
 /**
  * Rotates [bitmap] by [rotationDegrees] (as reported by CameraX ImageProxy)
  * so the image is correctly oriented for portrait display.
- * Returns the original bitmap unchanged if rotation is 0.
  */
 fun rotateBitmapForDisplay(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
     if (rotationDegrees == 0) return bitmap
@@ -393,34 +360,15 @@ fun rotateBitmapForDisplay(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
 
 // ── Compose previews ─────────────────────────────────────────────────────────────────
 
-@Composable
-fun PreviewCameraPreview() {
-    Box(
-        modifier = Modifier.fillMaxSize().background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("Camera Preview Simulation", color = Color.White, fontSize = 16.sp)
-    }
-}
-
 @Preview(showBackground = true, device = "id:pixel_5")
 @Composable
 fun DefaultPreview() {
-    val simulatedSpeed = remember { MutableStateFlow(72.5) }
     RoadRadarTheme {
-        Box(modifier = Modifier.fillMaxSize()) {
-            PreviewCameraPreview()
-            SpeedDisplay(vehicleSpeed = simulatedSpeed)
-            Box(modifier = Modifier.align(Alignment.TopCenter).padding(16.dp)) {
-                Text("RoadRadar", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            }
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart).padding(16.dp)
-                    .background(Color.White.copy(alpha = 0.3f), shape = RoundedCornerShape(8.dp))
-            ) {
-                Text("Calibrate", modifier = Modifier.padding(8.dp), color = Color.White)
-            }
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("RoadRadar", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
